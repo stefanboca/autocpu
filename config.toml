@@ -1,0 +1,20 @@
+upower_battery_path = "/org/freedesktop/UPower/devices/battery_BAT0"
+on_battery = "power"
+on_wallpower = "performance"
+
+[presets.power]
+epp = "power"
+hwp_dynamic_boost = false
+no_turbo = true
+scaling_governor = "power"
+
+[presets.balanced]
+epp = "default"
+hwp_dynamic_boost = false
+no_turbo = true
+scaling_governor = "power"
+
+[presets.performance]
+hwp_dynamic_boost = true
+no_turbo = false
+scaling_governor = "performance"
