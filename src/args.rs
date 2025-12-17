@@ -10,7 +10,7 @@ pub struct Args {
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     Daemon {
-        #[arg(short, long)]
+        #[arg(short, long, env = "AUTOCPU_CONFIG")]
         config: PathBuf,
     },
 }

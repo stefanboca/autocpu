@@ -7,6 +7,7 @@ edition = "2024"
 clap = { version = "4.5.53", default-features = false, features = [
   "color",
   "derive",
+  "env",
   "error-context",
   "help",
   "std",

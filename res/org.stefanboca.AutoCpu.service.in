@@ -1,0 +1,7 @@
+# vim: ft=ini
+
+[D-BUS Service]
+Name=org.stefanboca.AutoCpu
+Exec=@out@/bin/autocpu
+User=root
+SystemdService=autocpu.service

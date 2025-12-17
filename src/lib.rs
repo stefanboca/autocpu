@@ -1,6 +1,5 @@
 mod args;
 mod config;
-pub mod cpuinfo;
 pub mod daemon;
 mod power_state;
 mod preset;

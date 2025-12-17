@@ -1,0 +1,14 @@
+# vim: ft=systemd
+
+[Unit]
+Description=autocpu
+Requires=upower.service
+
+[Service]
+Type=dbus
+BusName=org.stefanboca.AutoCpu
+ExecStart=@out@/bin/autocpu daemon
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

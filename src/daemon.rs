@@ -145,6 +145,7 @@ async fn worker(
         };
 
         if let Some(preset) = config.presets.get(&preset_name) {
+            dbg!(preset_name);
             preset.apply()?;
         };
     }
@@ -157,8 +158,6 @@ pub async fn run(config: Arc<Config>) -> eyre::Result<()> {
         .name("org.stefanboca.AutoCpu")?
         .build()
         .await?;
-
-    dbg!(conn.unique_name());
 
     let daemon = Daemon::new(config, conn.clone()).await?;
     conn.object_server()

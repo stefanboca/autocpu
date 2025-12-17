@@ -1,10 +1,10 @@
-use std::{io::Read, path::PathBuf};
+use std::io::Read;
+use std::path::PathBuf;
 
 const FLROOT: &str = "/sys/devices/system/cpu";
 
 fn get(path: &str) -> Option<String> {
     let path = PathBuf::from(FLROOT).join(path);
-    // dbg!(&path);
     std::fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
