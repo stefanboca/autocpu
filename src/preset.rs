@@ -1,9 +1,10 @@
+// TODO: validate these values.
 #[derive(Debug, serde::Deserialize)]
 pub struct Preset {
-    pub epp: Option<String>,
+    pub epp: Option<String>, // TODO: make enum
     pub hwp_dynamic_boost: Option<bool>,
     pub no_turbo: Option<bool>,
-    pub scaling_governor: Option<String>,
+    pub scaling_governor: Option<String>, // TODO: make enum
 }
 
 impl Preset {
@@ -28,11 +29,14 @@ impl Preset {
             };
             let path = dir.path();
 
-            if let Some(epp) = self.epp.as_deref() {
-                std::fs::write(path.join("energy_performance_preference"), epp)?;
-            }
+            // The ordering of these two settings is important. If the governer is set to
+            // performance, then epp can only be set to performance. So if governor=performance and
+            // we're applying governor=powersave, epp=power, then applying epp first will fail.
             if let Some(scaling_governor) = self.scaling_governor.as_deref() {
                 std::fs::write(path.join("scaling_governor"), scaling_governor)?;
+            }
+            if let Some(epp) = self.epp.as_deref() {
+                std::fs::write(path.join("energy_performance_preference"), epp)?;
             }
         }
 

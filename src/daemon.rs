@@ -4,7 +4,6 @@ use std::sync::Arc;
 use futures::stream::StreamExt;
 use tokio::sync::{Mutex, mpsc};
 use upower_dbus::{BatteryType, DeviceProxy, UPowerProxy};
-use zbus::Connection;
 
 use crate::{Config, PowerState};
 
@@ -16,27 +15,17 @@ struct Daemon {
 }
 
 impl Daemon {
-    pub async fn new(config: Arc<Config>, conn: Connection) -> eyre::Result<Self> {
-        let (preset_tx, preset_rx) = mpsc::channel(1);
-        let current_state = Arc::new(Mutex::new(None));
-        let current_presets = Arc::new(Mutex::new(HashMap::from([
-            (PowerState::OnBattery, config.on_battery.clone()),
-            (PowerState::OnWallpower, config.on_wallpower.clone()),
-        ])));
-
-        tokio::spawn(worker(
-            config.clone(),
-            conn,
-            preset_rx,
-            current_state.clone(),
-            current_presets.clone(),
-        ));
-
+    pub async fn new(
+        config: Arc<Config>,
+        preset_tx: mpsc::Sender<String>,
+        current_state: Arc<Mutex<Option<PowerState>>>,
+        current_presets: Arc<Mutex<HashMap<PowerState, String>>>,
+    ) -> eyre::Result<Self> {
         Ok(Self {
             config,
+            preset_tx,
             current_state,
             current_presets,
-            preset_tx,
         })
     }
 }
@@ -145,7 +134,7 @@ async fn worker(
         };
 
         if let Some(preset) = config.presets.get(&preset_name) {
-            dbg!(preset_name);
+            dbg!(&preset_name);
             preset.apply()?;
         };
     }
@@ -154,17 +143,34 @@ async fn worker(
 }
 
 pub async fn run(config: Arc<Config>) -> eyre::Result<()> {
+    let (preset_tx, preset_rx) = mpsc::channel(1);
+    let current_state = Arc::new(Mutex::new(None));
+    let current_presets = Arc::new(Mutex::new(HashMap::from([
+        (PowerState::OnBattery, config.on_battery.clone()),
+        (PowerState::OnWallpower, config.on_wallpower.clone()),
+    ])));
+
+    let daemon = Daemon::new(
+        config.clone(),
+        preset_tx,
+        current_state.clone(),
+        current_presets.clone(),
+    )
+    .await?;
+
     let conn = zbus::connection::Builder::system()?
         .name("org.stefanboca.AutoCpu")?
+        .serve_at("/org/stefanboca/AutoCpu", daemon)?
         .build()
         .await?;
 
-    let daemon = Daemon::new(config, conn.clone()).await?;
-    conn.object_server()
-        .at("/org/stefanboca/AutoCpu", daemon)
-        .await?;
+    let handle = tokio::spawn(worker(
+        config,
+        conn,
+        preset_rx,
+        current_state,
+        current_presets,
+    ));
 
-    futures::future::pending::<()>().await;
-
-    Ok(())
+    handle.await?
 }
