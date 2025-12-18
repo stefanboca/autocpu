@@ -1,4 +1,5 @@
 // TODO: validate these values.
+// TODO: Arc<String> for all of these
 #[derive(Debug, serde::Deserialize)]
 pub struct Preset {
     pub epp: Option<String>, // TODO: make enum

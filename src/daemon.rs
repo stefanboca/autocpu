@@ -77,25 +77,18 @@ async fn worker(
     current_presets: Arc<Mutex<HashMap<PowerState, String>>>,
 ) -> eyre::Result<()> {
     // First, attempt to use the battery specified in the config
-    let battery = if let Some(upower_battery_path) = config.upower_battery_path.as_deref() {
-        DeviceProxy::new(&conn, upower_battery_path)
+    let battery = if let Some(upower_battery_path) = config.upower_battery_path.as_deref()
+        && let Ok(battery) = DeviceProxy::new(&conn, upower_battery_path)
             .await
             .inspect_err(|err| {
-                log::warn!(
-                    "Failed to create UPower device proxy for `{upower_battery_path}`: {err}"
-                )
-            })
-            .ok()
-    } else {
-        None
-    };
-
-    // If there is no configured battery or the configured battery is not found, try to find another battery
-    let battery = if let Some(battery) = battery {
+                log::warn!("Failed to create UPower DeviceProxy for `{upower_battery_path}`: {err}")
+            }) {
         Some(battery)
-    } else if let Ok(upower) = UPowerProxy::new(&conn)
+    }
+    // If there is no configured battery or the configured battery is not found, try to find another battery
+    else if let Ok(upower) = UPowerProxy::new(&conn)
         .await
-        .inspect_err(|err| log::warn!("Failed to create UPower proxy: {err}"))
+        .inspect_err(|err| log::warn!("Failed to create UPowerProxy: {err}"))
         && let Ok(device_paths) = upower
             .enumerate_devices()
             .await
@@ -106,7 +99,7 @@ async fn worker(
             if let Ok(device) = DeviceProxy::new(&conn, device_path.clone())
                 .await
                 .inspect_err(|err| {
-                    log::debug!("Failed to create UPower device proxy for `{device_path}`: {err}")
+                    log::debug!("Failed to create UPower DeviceProxy for `{device_path}`: {err}")
                 })
                 && let Ok(BatteryType::Battery) = device
                     .type_()
@@ -122,9 +115,9 @@ async fn worker(
         None
     };
 
-    let mut stream = if let Some(device) = battery {
-        log::info!("Found battery `{}`", device.inner().path());
-        device
+    let mut stream = if let Some(battery) = battery {
+        log::info!("Found battery `{}`", battery.inner().path());
+        battery
             .receive_state_changed()
             .await
             .then(|event| async move {
@@ -141,29 +134,24 @@ async fn worker(
             biased;
 
             Some(preset_name) = preset_rx.recv() => {
-                {
-                    if let Some(current_state) = *current_state.lock().await {
-                        let mut current_presets_ = current_presets.lock().await;
-                        if current_presets_.get(&current_state).is_some_and(|preset| *preset == preset_name) {
-                            continue;
-                        };
-                        current_presets_.insert(current_state, preset_name.clone());
-                    }
+                if let Some(current_state) = *current_state.lock().await {
+                    let mut current_presets_ = current_presets.lock().await;
+                    if current_presets_.get(&current_state).is_some_and(|preset| *preset == preset_name) {
+                        continue;
+                    };
+                    current_presets_.insert(current_state, preset_name.clone());
                 }
 
                 preset_name
             }
             Some(state) = stream.next() => {
+                // TODO: only apply preset if the state has changed
                 let state = state?;
                 *current_state.lock().await = Some(state);
-
                 current_presets.lock().await.get(&state).unwrap().clone()
             }
 
-            else => {
-                log::debug!("Worker exiting");
-                break;
-            }
+            else => eyre::bail!("worker exiting")
         };
 
         if let Some(preset) = config.presets.get(&preset_name) {
@@ -171,8 +159,6 @@ async fn worker(
             preset.apply();
         };
     }
-
-    Ok(())
 }
 
 pub async fn run(config: Arc<Config>) -> eyre::Result<()> {
