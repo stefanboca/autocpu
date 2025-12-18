@@ -76,46 +76,54 @@ async fn worker(
     current_state: Arc<Mutex<Option<PowerState>>>,
     current_presets: Arc<Mutex<HashMap<PowerState, String>>>,
 ) -> eyre::Result<()> {
-    let upower = UPowerProxy::new(&conn)
-        .await
-        .inspect_err(|err| log::warn!("Failed to create UPower proxy: {err}. Is UPower running?"))
-        .ok();
-
-    let device_paths = if let Some(upower) = upower {
-        upower
-            .enumerate_devices()
+    // First, attempt to use the battery specified in the config
+    let battery = if let Some(upower_battery_path) = config.upower_battery_path.as_deref() {
+        DeviceProxy::new(&conn, upower_battery_path)
             .await
-            .inspect_err(|err| log::warn!("Failed to enumerate UPower devices: {err}"))
+            .inspect_err(|err| {
+                log::warn!(
+                    "Failed to create UPower device proxy for `{upower_battery_path}`: {err}"
+                )
+            })
             .ok()
     } else {
         None
     };
 
-    let device: Option<DeviceProxy<'_>> = if let Some(device_paths) = device_paths {
-        let mut device = None;
+    // If there is no configured battery or the configured battery is not found, try to find another battery
+    let battery = if let Some(battery) = battery {
+        Some(battery)
+    } else if let Ok(upower) = UPowerProxy::new(&conn)
+        .await
+        .inspect_err(|err| log::warn!("Failed to create UPower proxy: {err}"))
+        && let Ok(device_paths) = upower
+            .enumerate_devices()
+            .await
+            .inspect_err(|err| log::debug!("Failed to enumerate UPower devices: {err}"))
+    {
+        let mut battery = None;
         for device_path in device_paths {
-            let matches_config = config
-                .upower_battery_path
-                .as_ref()
-                .is_some_and(|battery| battery == device_path.as_str());
-
-            let dev = DeviceProxy::new(&conn, device_path.clone()).await?;
-
-            let Ok(type_) = dev.type_().await else {
-                continue;
-            };
-            if matches_config || type_ == BatteryType::Battery {
-                log::info!("Found battery `{device_path}`");
-                device = Some(dev);
+            if let Ok(device) = DeviceProxy::new(&conn, device_path.clone())
+                .await
+                .inspect_err(|err| {
+                    log::debug!("Failed to create UPower device proxy for `{device_path}`: {err}")
+                })
+                && let Ok(BatteryType::Battery) = device
+                    .type_()
+                    .await
+                    .inspect_err(|err| log::debug!("Failed to get type of `{device_path}`: {err}"))
+            {
+                battery = Some(device);
                 break;
-            }
+            };
         }
-        device
+        battery
     } else {
         None
     };
 
-    let mut stream = if let Some(device) = device {
+    let mut stream = if let Some(device) = battery {
+        log::info!("Found battery `{}`", device.inner().path());
         device
             .receive_state_changed()
             .await
