@@ -1,6 +1,7 @@
 {
   inputs = {
     nixpkgs.url = "https://channels.nixos.org/nixos-unstable/nixexprs.tar.xz";
+    crane.url = "github:ipetkov/crane";
 
     treefmt-nix.url = "github:numtide/treefmt-nix";
     treefmt-nix.inputs.nixpkgs.follows = "nixpkgs";
@@ -9,55 +10,51 @@
   outputs = {
     self,
     nixpkgs,
+    crane,
     treefmt-nix,
     ...
   }: let
     inherit (nixpkgs) lib;
     inherit (lib.attrsets) genAttrs mapAttrs' nameValuePair;
-    inherit (lib.fileset) fileFilter toSource unions;
+    inherit (lib.fileset) toSource unions;
     inherit (lib.modules) importApply;
-    inherit (lib.trivial) importTOML;
 
     systems = ["x86_64-linux" "aarch64-linux"];
     forAllSystems = f: genAttrs systems (system: f (import nixpkgs {inherit system;}));
 
-    cargoToml = importTOML ./Cargo.toml;
+    mkPackages = pkgs: let
+      craneLib = crane.mkLib pkgs;
 
-    mkPackages = pkgs: {
-      autocpu = pkgs.rustPlatform.buildRustPackage {
-        pname = cargoToml.package.name;
-        inherit (cargoToml.package) version;
-
+      commonArgs = {
         src = toSource {
           root = ./.;
           fileset = unions [
-            ./Cargo.lock
-            ./Cargo.toml
-            ./res/autocpu.service.in
-            ./res/org.stefanboca.AutoCpu.service.in
-            ./res/org.stefanboca.AutoCpu.conf
-            (fileFilter (file: file.hasExt "rs") ./.)
+            (craneLib.fileset.commonCargoSources ./.)
+            ./res
           ];
         };
-
-        cargoLock = {
-          lockFile = ./Cargo.lock;
-          allowBuiltinFetchGit = true;
-        };
-
-        postInstall = ''
-          mkdir -p $out/lib/systemd/system
-          substitute  ./res/autocpu.service.in $out/lib/systemd/system/autocpu.service --subst-var out
-
-          mkdir -p $out/share/dbus-1/{system.d,system-services}
-          mv ./res/org.stefanboca.AutoCpu.conf $out/share/dbus-1/system.d/
-          substitute ./res/org.stefanboca.AutoCpu.service.in $out/share/dbus-1/system-services/org.stefanboca.AutoCpu.service --subst-var out
-        '';
-
-        meta = {
-          mainProgram = "autocpu";
-        };
+        strictDeps = true;
       };
+
+      cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+    in {
+      autocpu = craneLib.buildPackage (commonArgs
+        // {
+          inherit cargoArtifacts;
+
+          postInstall = ''
+            mkdir -p $out/lib/systemd/system
+            substitute  ./res/autocpu.service.in $out/lib/systemd/system/autocpu.service --subst-var out
+
+            mkdir -p $out/share/dbus-1/{system.d,system-services}
+            mv ./res/org.stefanboca.AutoCpu.conf $out/share/dbus-1/system.d/
+            substitute ./res/org.stefanboca.AutoCpu.service.in $out/share/dbus-1/system-services/org.stefanboca.AutoCpu.service --subst-var out
+          '';
+
+          meta = {
+            mainProgram = "autocpu";
+          };
+        });
     };
 
     treefmt = forAllSystems (pkgs: treefmt-nix.lib.evalModule pkgs ./treefmt.nix);
@@ -73,8 +70,13 @@
 
     nixosModules.default = importApply ./nix/nixos.nix self;
 
-    devShells = forAllSystems (pkgs: {
-      default = pkgs.mkShellNoCC {};
+    devShells = forAllSystems (pkgs: let
+      craneLib = crane.mkLib pkgs;
+      packages = mkPackages pkgs;
+    in {
+      default = craneLib.devShell {
+        inputsFrom = [packages.autocpu];
+      };
     });
 
     formatter = forAllSystems (pkgs: treefmt.${pkgs.stdenv.hostPlatform.system}.config.build.wrapper);
