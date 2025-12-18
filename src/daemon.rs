@@ -15,18 +15,18 @@ struct Daemon {
 }
 
 impl Daemon {
-    pub async fn new(
+    pub fn new(
         config: Arc<Config>,
         preset_tx: mpsc::Sender<String>,
         current_state: Arc<Mutex<Option<PowerState>>>,
         current_presets: Arc<Mutex<HashMap<PowerState, String>>>,
-    ) -> eyre::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             config,
             preset_tx,
             current_state,
             current_presets,
-        })
+        }
     }
 }
 
@@ -75,7 +75,7 @@ async fn worker(
     let upower = UPowerProxy::new(&conn).await?;
     let device_paths = upower.enumerate_devices().await?;
 
-    let device = {
+    let device: Option<DeviceProxy<'_>> = {
         let mut device = None;
         for device_path in device_paths {
             let matches_config = config
@@ -83,9 +83,10 @@ async fn worker(
                 .as_ref()
                 .is_some_and(|battery| battery == device_path.as_str());
 
-            let dev = DeviceProxy::new(&conn, device_path).await?;
+            let dev = DeviceProxy::new(&conn, device_path.clone()).await?;
 
             if matches_config || dev.type_().await? == BatteryType::Battery {
+                log::info!("Found battery `{device_path}`");
                 device = Some(dev);
                 break;
             }
@@ -93,7 +94,7 @@ async fn worker(
         device
     };
 
-    let stream = if let Some(device) = device {
+    let mut stream = if let Some(device) = device {
         device
             .receive_state_changed()
             .await
@@ -102,9 +103,9 @@ async fn worker(
             })
             .boxed()
     } else {
+        log::info!("No battery found, assuming wallpower");
         futures::stream::once(async { Ok(PowerState::OnWallpower) }).boxed()
     };
-    let mut stream = stream.peekable();
 
     loop {
         let preset_name = tokio::select! {
@@ -130,12 +131,15 @@ async fn worker(
                 current_presets.lock().await.get(&state).unwrap().clone()
             }
 
-            else => break
+            else => {
+                log::debug!("Worker exiting");
+                break;
+            }
         };
 
         if let Some(preset) = config.presets.get(&preset_name) {
-            dbg!(&preset_name);
-            preset.apply()?;
+            log::info!("Applying preset `{preset_name}`");
+            preset.apply();
         };
     }
 
@@ -143,6 +147,7 @@ async fn worker(
 }
 
 pub async fn run(config: Arc<Config>) -> eyre::Result<()> {
+    log::info!("Starting...");
     let (preset_tx, preset_rx) = mpsc::channel(1);
     let current_state = Arc::new(Mutex::new(None));
     let current_presets = Arc::new(Mutex::new(HashMap::from([
@@ -155,8 +160,7 @@ pub async fn run(config: Arc<Config>) -> eyre::Result<()> {
         preset_tx,
         current_state.clone(),
         current_presets.clone(),
-    )
-    .await?;
+    );
 
     let conn = zbus::connection::Builder::system()?
         .name("org.stefanboca.AutoCpu")?
@@ -171,6 +175,7 @@ pub async fn run(config: Arc<Config>) -> eyre::Result<()> {
         current_state,
         current_presets,
     ));
+    log::info!("Started");
 
     handle.await?
 }

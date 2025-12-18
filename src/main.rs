@@ -3,6 +3,11 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Info)
+        .parse_default_env()
+        .init();
+
     let args = Args::parse();
 
     match args.command {
