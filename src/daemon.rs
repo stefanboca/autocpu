@@ -30,15 +30,17 @@ impl Daemon {
     }
 }
 
-#[zbus::interface(name = "org.stefanboca.AutoCpu")]
+#[zbus::interface(name = "org.stefanboca.AutoCpu", proxy)]
 impl Daemon {
     #[zbus(property(emits_changed_signal = "const"))]
-    async fn available_presets(&self) -> Vec<&str> {
-        self.config.presets.keys().map(|s| s.as_ref()).collect()
+    async fn available_presets(&self) -> Vec<String> {
+        log::trace!("Daemon::available_presets");
+        self.config.presets.keys().cloned().collect()
     }
 
     #[zbus(property(emits_changed_signal = "true"))]
     async fn current_preset(&self) -> String {
+        log::trace!("Daemon::current_preset");
         let Some(state) = *self.current_state.lock().await else {
             return String::new();
         };
@@ -52,10 +54,12 @@ impl Daemon {
 
     #[zbus(property)]
     async fn set_current_preset(&mut self, preset_name: &str) -> zbus::fdo::Result<()> {
+        log::trace!("Daemon::set_current_preset({preset_name:?})");
         if self.config.presets.contains_key(preset_name) {
             self.preset_tx
                 .send(preset_name.to_string())
                 .await
+                .inspect_err(|err| log::error!("Failed to send: {err}"))
                 .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
         } else {
             Err(zbus::fdo::Error::Failed(
@@ -72,10 +76,22 @@ async fn worker(
     current_state: Arc<Mutex<Option<PowerState>>>,
     current_presets: Arc<Mutex<HashMap<PowerState, String>>>,
 ) -> eyre::Result<()> {
-    let upower = UPowerProxy::new(&conn).await?;
-    let device_paths = upower.enumerate_devices().await?;
+    let upower = UPowerProxy::new(&conn)
+        .await
+        .inspect_err(|err| log::warn!("Failed to create UPower proxy: {err}. Is UPower running?"))
+        .ok();
 
-    let device: Option<DeviceProxy<'_>> = {
+    let device_paths = if let Some(upower) = upower {
+        upower
+            .enumerate_devices()
+            .await
+            .inspect_err(|err| log::warn!("Failed to enumerate UPower devices: {err}"))
+            .ok()
+    } else {
+        None
+    };
+
+    let device: Option<DeviceProxy<'_>> = if let Some(device_paths) = device_paths {
         let mut device = None;
         for device_path in device_paths {
             let matches_config = config
@@ -85,13 +101,18 @@ async fn worker(
 
             let dev = DeviceProxy::new(&conn, device_path.clone()).await?;
 
-            if matches_config || dev.type_().await? == BatteryType::Battery {
+            let Ok(type_) = dev.type_().await else {
+                continue;
+            };
+            if matches_config || type_ == BatteryType::Battery {
                 log::info!("Found battery `{device_path}`");
                 device = Some(dev);
                 break;
             }
         }
         device
+    } else {
+        None
     };
 
     let mut stream = if let Some(device) = device {
