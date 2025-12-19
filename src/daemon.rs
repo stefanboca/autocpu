@@ -2,31 +2,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::stream::StreamExt;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, oneshot};
 use upower_dbus::{BatteryType, DeviceProxy, UPowerProxy};
 
 use crate::{Config, PowerState};
 
+enum Message {
+    GetPreset(oneshot::Sender<String>),
+    SetPreset(String),
+}
+
 struct Daemon {
     config: Arc<Config>,
-    preset_tx: mpsc::Sender<String>,
-    current_state: Arc<Mutex<Option<PowerState>>>,
-    current_presets: Arc<Mutex<HashMap<PowerState, String>>>,
+    message_tx: mpsc::Sender<Message>,
 }
 
 impl Daemon {
-    pub fn new(
-        config: Arc<Config>,
-        preset_tx: mpsc::Sender<String>,
-        current_state: Arc<Mutex<Option<PowerState>>>,
-        current_presets: Arc<Mutex<HashMap<PowerState, String>>>,
-    ) -> Self {
-        Self {
-            config,
-            preset_tx,
-            current_state,
-            current_presets,
-        }
+    pub fn new(config: Arc<Config>, message_tx: mpsc::Sender<Message>) -> Self {
+        Self { config, message_tx }
     }
 }
 
@@ -39,42 +32,31 @@ impl Daemon {
     }
 
     #[zbus(property(emits_changed_signal = "true"))]
-    async fn current_preset(&self) -> String {
+    async fn current_preset(&self) -> zbus::fdo::Result<String> {
         log::trace!("Daemon::current_preset");
-        let Some(state) = *self.current_state.lock().await else {
-            return String::new();
-        };
-        self.current_presets
-            .lock()
+        let (tx, rx) = oneshot::channel();
+        self.message_tx
+            .send(Message::GetPreset(tx))
             .await
-            .get(&state)
-            .cloned()
-            .unwrap_or_else(String::new)
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))?;
+        rx.await
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
     }
 
     #[zbus(property)]
     async fn set_current_preset(&mut self, preset_name: &str) -> zbus::fdo::Result<()> {
         log::trace!("Daemon::set_current_preset({preset_name:?})");
-        if self.config.presets.contains_key(preset_name) {
-            self.preset_tx
-                .send(preset_name.to_string())
-                .await
-                .inspect_err(|err| log::error!("Failed to send: {err}"))
-                .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
-        } else {
-            Err(zbus::fdo::Error::Failed(
-                "profile name is not valid; check available presets.".to_string(),
-            ))
-        }
+        self.message_tx
+            .send(Message::SetPreset(preset_name.to_string()))
+            .await
+            .map_err(|err| zbus::fdo::Error::Failed(err.to_string()))
     }
 }
 
 async fn worker(
     config: Arc<Config>,
     conn: zbus::Connection,
-    mut preset_rx: mpsc::Receiver<String>,
-    current_state: Arc<Mutex<Option<PowerState>>>,
-    current_presets: Arc<Mutex<HashMap<PowerState, String>>>,
+    mut message_rx: mpsc::Receiver<Message>,
 ) -> eyre::Result<()> {
     // First, attempt to use the battery specified in the config
     let battery = if let Some(upower_battery_path) = config.upower_battery_path.as_deref()
@@ -129,26 +111,47 @@ async fn worker(
         futures::stream::once(async { Ok(PowerState::OnWallpower) }).boxed()
     };
 
+    let mut current_state = None;
+    let mut current_presets = HashMap::from([
+        (PowerState::OnBattery, config.on_battery.clone()),
+        (PowerState::OnWallpower, config.on_wallpower.clone()),
+    ]);
+
     loop {
         let preset_name = tokio::select! {
             biased;
 
-            Some(preset_name) = preset_rx.recv() => {
-                if let Some(current_state) = *current_state.lock().await {
-                    let mut current_presets_ = current_presets.lock().await;
-                    if current_presets_.get(&current_state).is_some_and(|preset| *preset == preset_name) {
+            Some(message) = message_rx.recv() => {
+                match message {
+                    Message::GetPreset(tx) => {
+                        let preset_name = if let Some(state) = current_state {
+                            current_presets.get(&state).unwrap().clone()
+                        } else {
+                            String::new()
+                        };
+                        if let Err(err) = tx.send(preset_name) {
+                            log::warn!("Failed to send: {err}")
+                        };
                         continue;
-                    };
-                    current_presets_.insert(current_state, preset_name.clone());
+                    },
+                    Message::SetPreset(preset_name) => {
+                        if let Some(current_state) = current_state {
+                            if current_presets.get(&current_state).is_some_and(|preset| *preset == preset_name) {
+                                continue;
+                            };
+                            current_presets.insert(current_state, preset_name.clone());
+                        }
+                        preset_name
+                    },
                 }
-
-                preset_name
             }
             Some(state) = stream.next() => {
-                // TODO: only apply preset if the state has changed
                 let state = state?;
-                *current_state.lock().await = Some(state);
-                current_presets.lock().await.get(&state).unwrap().clone()
+                if current_state == Some(state) {
+                    continue;
+                }
+                current_state = Some(state);
+                current_presets.get(&state).unwrap().clone()
             }
 
             else => eyre::bail!("worker exiting")
@@ -163,19 +166,9 @@ async fn worker(
 
 pub async fn run(config: Arc<Config>) -> eyre::Result<()> {
     log::info!("Starting...");
-    let (preset_tx, preset_rx) = mpsc::channel(1);
-    let current_state = Arc::new(Mutex::new(None));
-    let current_presets = Arc::new(Mutex::new(HashMap::from([
-        (PowerState::OnBattery, config.on_battery.clone()),
-        (PowerState::OnWallpower, config.on_wallpower.clone()),
-    ])));
+    let (message_tx, message_rx) = mpsc::channel(1);
 
-    let daemon = Daemon::new(
-        config.clone(),
-        preset_tx,
-        current_state.clone(),
-        current_presets.clone(),
-    );
+    let daemon = Daemon::new(config.clone(), message_tx);
 
     let conn = zbus::connection::Builder::system()?
         .name("org.stefanboca.AutoCpu")?
@@ -183,13 +176,7 @@ pub async fn run(config: Arc<Config>) -> eyre::Result<()> {
         .build()
         .await?;
 
-    let handle = tokio::spawn(worker(
-        config,
-        conn,
-        preset_rx,
-        current_state,
-        current_presets,
-    ));
+    let handle = tokio::spawn(worker(config, conn, message_rx));
     log::info!("Started");
 
     handle.await?
